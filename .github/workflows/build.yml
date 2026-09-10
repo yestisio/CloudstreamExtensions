@@ -1,3 +1,59 @@
+name: Build
+
+on:
+  push:
+    branches: [ master, main ]
+    paths-ignore:
+      - 'README.md'
+
+  workflow_dispatch:
+
+  workflow_run:
+    workflows: ["Sync Plugins"]
+    types:
+      - completed
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    permissions:
+      contents: write
+
+    steps:
+
+      # =========================
+      # CHECKOUT SOURCE
+      # =========================
+      - name: Checkout Source
+        uses: actions/checkout@v4
+        with:
+          path: "src"
+
+      # =========================
+      # CHECKOUT BUILDS BRANCH
+      # =========================
+      - name: Checkout Builds Branch
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: "builds"
+          path: "builds"
+
+      # =========================
+      # CREATE BUILDS DIRECTORY
+      # =========================
+      - name: Create builds dir if missing
+        run: mkdir -p "$GITHUB_WORKSPACE/builds"
+
+      # =========================
+      # SETUP JAVA
+      # =========================
       - name: Setup JDK 21
         uses: actions/setup-java@v4
         with:
@@ -5,9 +61,13 @@
           distribution: 'zulu'
           cache: 'gradle'
 
+      # =========================
+      # FIX OLD ANDROID MANIFESTS
+      # =========================
       - name: Fix legacy AndroidManifest package attributes
         run: |
           cd src
+
           python3 << 'PY'
           import os
           import re
@@ -16,6 +76,7 @@
 
           for root, dirs, files in os.walk("."):
               for file in files:
+
                   if file != "AndroidManifest.xml":
                       continue
 
@@ -32,17 +93,411 @@
                   )
 
                   if new_content != content:
+
                       with open(path, "w", encoding="utf-8") as f:
                           f.write(new_content)
+
                       print(f"Fixed: {path}")
                       fixed += 1
 
           print(f"Fixed {fixed} AndroidManifest.xml files.")
           PY
 
+      # =========================
+      # BUILD PLUGINS
+      # =========================
       - name: Build Plugins
         run: |
           cd src
+
           chmod +x gradlew
+
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
           ./gradlew buildAll --continue --stacktrace
+
+      # =========================
+      # HARVEST CS3 + GENERATE JSON
+      # =========================
+      - name: Harvesting, plugins.json & Builds README Generation
+        if: always()
+        run: |
+
+          rm -f "$GITHUB_WORKSPACE/builds"/*.cs3
+
+          find src -name "*.cs3" -exec cp -v {} "$GITHUB_WORKSPACE/builds/" \;
+
+          python3 << 'EOF'
+
+          import os
+          import json
+          import re
+          from datetime import datetime
+
+          builds_dir = os.path.join(
+              os.environ['GITHUB_WORKSPACE'],
+              'builds'
+          )
+
+          src_dir = os.path.join(
+              os.environ['GITHUB_WORKSPACE'],
+              'src'
+          )
+
+          plugins = []
+          categories_summary = {}
+
+          categories = [
+              'Anime',
+              'Bollywood',
+              'International',
+              'LiveTV',
+              'Tools'
+          ]
+
+          def extract_gradle_field(content, field):
+
+              match = re.search(
+                  rf'{field}\s*=\s*"(.*?)"',
+                  content
+              )
+
+              if match:
+                  return match.group(1)
+
+              match = re.search(
+                  rf'{field}\s*=\s*listOf\((.*?)\)',
+                  content
+              )
+
+              if match:
+                  return [
+                      x.strip().replace('"', '').replace("'", "")
+                      for x in match.group(1).split(',')
+                  ]
+
+              match = re.search(
+                  rf'{field}\s*=\s*(\d+)',
+                  content
+              )
+
+              if match:
+                  return int(match.group(1))
+
+              return None
+
+
+          for cat in categories:
+
+              cat_path = os.path.join(
+                  src_dir,
+                  cat
+              )
+
+              if not os.path.exists(cat_path):
+                  continue
+
+              categories_summary[cat] = []
+
+              for plugin_name in sorted(
+                  os.listdir(cat_path)
+              ):
+
+                  plugin_dir = os.path.join(
+                      cat_path,
+                      plugin_name
+                  )
+
+                  if not os.path.isdir(plugin_dir):
+                      continue
+
+                  cs3_file = f"{plugin_name}.cs3"
+
+                  cs3_path = os.path.join(
+                      builds_dir,
+                      cs3_file
+                  )
+
+                  if not os.path.exists(cs3_path):
+                      continue
+
+                  gradle_file = os.path.join(
+                      plugin_dir,
+                      'build.gradle.kts'
+                  )
+
+                  # Default metadata
+                  version = 1
+                  lang = "en"
+                  authors = ["Adam Knight"]
+                  tv_types = ["Others"]
+
+                  description = (
+                      f"Adam Knight curated source for {plugin_name}"
+                  )
+
+                  status = 1
+
+                  if os.path.exists(gradle_file):
+
+                      with open(
+                          gradle_file,
+                          'r',
+                          encoding='utf-8'
+                      ) as f:
+
+                          content = f.read()
+
+                          # Version
+                          v_match = re.search(
+                              r'version\s*=\s*(\d+)',
+                              content
+                          )
+
+                          if v_match:
+                              version = int(
+                                  v_match.group(1)
+                              )
+
+                          # Language
+                          g_lang = extract_gradle_field(
+                              content,
+                              "language"
+                          )
+
+                          if g_lang:
+                              lang = g_lang
+
+                          # Authors
+                          g_authors = extract_gradle_field(
+                              content,
+                              "authors"
+                          )
+
+                          if g_authors:
+                              authors = g_authors
+
+                          # TV Types
+                          g_types = extract_gradle_field(
+                              content,
+                              "tvTypes"
+                          )
+
+                          if g_types:
+                              tv_types = g_types
+
+                          # Description
+                          g_desc = extract_gradle_field(
+                              content,
+                              "description"
+                          )
+
+                          if g_desc:
+                              description = g_desc
+
+                          # Status
+                          g_status = extract_gradle_field(
+                              content,
+                              "status"
+                          )
+
+                          if g_status is not None:
+                              status = g_status
+
+
+                  repository_url = (
+                      f"https://github.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}"
+                  )
+
+                  plugin_url = (
+                      f"https://raw.githubusercontent.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}"
+                      f"/builds/{cs3_file}"
+                  )
+
+                  icon_url = (
+                      f"https://raw.githubusercontent.com/"
+                      f"{os.environ['GITHUB_REPOSITORY']}"
+                      f"/master/{cat}/{plugin_name}/icon.png"
+                  )
+
+
+                  plugin_data = {
+
+                      "name": plugin_name,
+
+                      "internalName": plugin_name,
+
+                      "version": version,
+
+                      "description": description,
+
+                      "repositoryUrl": repository_url,
+
+                      "url": plugin_url,
+
+                      "authors": authors,
+
+                      "tvTypes": tv_types,
+
+                      "language": lang,
+
+                      "iconUrl": icon_url,
+
+                      "status": status,
+
+                      "apiVersion": 1
+                  }
+
+
+                  plugins.append(plugin_data)
+
+                  categories_summary[cat].append(
+                      plugin_name
+                  )
+
+
+          # =========================
+          # WRITE PLUGINS.JSON
+          # =========================
+
+          with open(
+              os.path.join(
+                  builds_dir,
+                  'plugins.json'
+              ),
+              'w',
+              encoding='utf-8'
+          ) as f:
+
+              json.dump(
+                  plugins,
+                  f,
+                  indent=4,
+                  ensure_ascii=False
+              )
+
+
+          # =========================
+          # GENERATE README
+          # =========================
+
+          now = datetime.now().strftime(
+              "%Y-%m-%d %H:%M:%S"
+          )
+
+          header = (
+              "# 🚀 Adam Knight Mega-Repo Dashboard "
+              "(Builds)\n\n"
+          )
+
+          header += (
+              "This branch contains the compiled "
+              "`.cs3` files and the live index.\n\n"
+          )
+
+          header += "### 📊 Status\n"
+
+          header += (
+              f"* **Total Plugins Live:** "
+              f"`{len(plugins)}` / 155\n"
+          )
+
+          header += (
+              f"* **Last Update:** "
+              f"`{now}` UTC\n"
+          )
+
+          header += (
+              f"* **Repo URL:** "
+              f"`https://raw.githubusercontent.com/"
+              f"{os.environ['GITHUB_REPOSITORY']}"
+              f"/builds/plugins.json`\n\n"
+          )
+
+          header += "---\n\n"
+
+          header += (
+              "### 📂 Available Plugins by Category\n\n"
+          )
+
+
+          body = ""
+
+          for cat, p_list in categories_summary.items():
+
+              if p_list:
+
+                  body += (
+                      f"#### 📁 {cat} "
+                      f"({len(p_list)})\n"
+                  )
+
+                  body += ", ".join(
+                      [f"`{p}`" for p in p_list]
+                  )
+
+                  body += "\n\n"
+
+
+          footer = (
+              "\n---\n"
+              "*Maintained by Adam Knight*"
+          )
+
+
+          with open(
+              os.path.join(
+                  builds_dir,
+                  'README.md'
+              ),
+              'w',
+              encoding='utf-8'
+          ) as f:
+
+              f.write(
+                  header +
+                  body +
+                  footer
+              )
+
+
+          print(
+              f"Generated Dashboard with "
+              f"{len(plugins)} plugins."
+          )
+
+          EOF
+
+          # Copy repo.json
+          cp src/repo.json "$GITHUB_WORKSPACE/builds/" || true
+
+      # =========================
+      # PUSH BUILDS BRANCH
+      # =========================
+      - name: Push to Builds Branch
+        if: always()
+        run: |
+
+          cd "$GITHUB_WORKSPACE/builds"
+
+          git init || true
+
+          git config --local user.email "actions@github.com"
+
+          git config --local user.name "GitHub Actions"
+
+          git remote add origin \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" \
+            || true
+
+          git checkout -b builds || git checkout builds
+
+          git add .
+
+          git commit \
+            -m "Dashboard Update: ${GITHUB_SHA::8}" \
+            || echo "No changes"
+
+          git push origin builds --force
