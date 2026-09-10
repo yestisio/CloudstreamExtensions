@@ -34,15 +34,54 @@ jobs:
       - name: Create builds dir if missing
         run: mkdir -p $GITHUB_WORKSPACE/builds
 
-      - name: Setup JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: 21
-          distribution: 'zulu'
-          cache: 'gradle'
+              - name: Setup JDK 21
+          uses: actions/setup-java@v4
+          with:
+            java-version: 21
+            distribution: 'zulu'
+            cache: 'gradle'
 
-            - name: Fix legacy AndroidManifest package attributes
-        run: |
+        - name: Fix legacy AndroidManifest package attributes
+          run: |
+            cd src
+            python3 << 'PY'
+            import os
+            import re
+
+            fixed = 0
+
+            for root, dirs, files in os.walk("."):
+                for file in files:
+                    if file != "AndroidManifest.xml":
+                        continue
+
+                    path = os.path.join(root, file)
+
+                    with open(path, "r", encoding="utf-8") as f:
+                        content = f.read()
+
+                    new_content = re.sub(
+                        r'\s+package\s*=\s*["\'][^"\']*["\']',
+                        "",
+                        content,
+                        count=1
+                    )
+
+                    if new_content != content:
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(new_content)
+                        print(f"Fixed: {path}")
+                        fixed += 1
+
+            print(f"Fixed {fixed} AndroidManifest.xml files.")
+            PY
+
+        - name: Build Plugins
+          run: |
+            cd src
+            chmod +x gradlew
+            echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+            ./gradlew buildAll --continue --stacktrace
           cd src
           python3 << 'PY'
           import os
