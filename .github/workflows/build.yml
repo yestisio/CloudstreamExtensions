@@ -41,6 +41,42 @@ jobs:
           distribution: 'zulu'
           cache: 'gradle'
 
+            - name: Fix legacy AndroidManifest package attributes
+        run: |
+          cd src
+          python3 << 'PY'
+          import os
+          import re
+
+          fixed = 0
+
+          for root, dirs, files in os.walk("."):
+              for file in files:
+                  if file != "AndroidManifest.xml":
+                      continue
+
+                  path = os.path.join(root, file)
+
+                  with open(path, "r", encoding="utf-8") as f:
+                      content = f.read()
+
+                  # AGP 8+ no longer supports package="..." in source manifests.
+                  new_content = re.sub(
+                      r'\s+package\s*=\s*["\'][^"\']*["\']',
+                      "",
+                      content,
+                      count=1
+                  )
+
+                  if new_content != content:
+                      with open(path, "w", encoding="utf-8") as f:
+                          f.write(new_content)
+                      print(f"Fixed: {path}")
+                      fixed += 1
+
+          print(f"Fixed {fixed} AndroidManifest.xml files.")
+          PY
+
       - name: Build Plugins
         run: |
           cd src
